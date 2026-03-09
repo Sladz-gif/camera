@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-import easyocr
 import torch
 from ultralytics import YOLO
 
@@ -19,9 +18,11 @@ FRAMES_DIR = DETECTIONS_DIR / 'frames'
 FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 CSV_PATH = DETECTIONS_DIR / 'plates.csv'
 
-MODEL_PATH = 'best.pt'
+PLATE_MODEL_PATH = 'runs/detect/runs/ghana_npr_v3_final3/weights/best.pt'
+CHAR_MODEL_PATH = 'runs/detect/runs/char_recognition_v13/weights/best.pt'
 CAMERA_INDEX = 2
 MIN_CONF = 0.35
+CHAR_MIN_CONF = 0.35
 CROP_PADDING_PX = 25
 CAPTURE_COOLDOWN_SECONDS = 2.0
 SAVE_FULL_FRAME = True
@@ -47,9 +48,42 @@ def _append_csv_row(csv_path: Path, row: dict) -> None:
         writer.writerow(row)
 
 
+def _read_plate_text_with_char_model(char_model: YOLO, plate_bgr) -> str:
+    char_results = char_model.predict(source=plate_bgr, verbose=False)
+    if not char_results:
+        return ''
+
+    r = char_results[0]
+    if r.boxes is None or len(r.boxes) == 0:
+        return ''
+
+    boxes = r.boxes
+    names = r.names or {}
+
+    chars = []
+    for i in range(len(boxes)):
+        conf = float(boxes.conf[i].item())
+        if conf < CHAR_MIN_CONF:
+            continue
+
+        cls_id = int(boxes.cls[i].item())
+        label = names.get(cls_id, str(cls_id))
+
+        xyxy = boxes.xyxy[i].cpu().numpy().astype(float)
+        x_center = float((xyxy[0] + xyxy[2]) / 2.0)
+        chars.append((x_center, label))
+
+    if not chars:
+        return ''
+
+    chars.sort(key=lambda t: t[0])
+    text = ''.join(ch for _, ch in chars)
+    return _sanitize_plate_text(text)
+
+
 def main() -> None:
-    model = YOLO(MODEL_PATH)
-    reader = easyocr.Reader(['en'], gpu=False)
+    plate_model = YOLO(PLATE_MODEL_PATH)
+    char_model = YOLO(CHAR_MODEL_PATH)
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -68,7 +102,7 @@ def main() -> None:
             print("Failed to read frame from camera.")
             break
 
-        results = model.predict(source=frame, verbose=False)
+        results = plate_model.predict(source=frame, verbose=False)
         r0 = results[0]
         annotated = r0.plot()
 
@@ -109,19 +143,16 @@ def main() -> None:
             dt = datetime.now()
             ts = dt.strftime('%Y%m%d_%H%M%S')
 
-            plate_img_path = PLATES_DIR / f'plate_{ts}.jpg'
+            plate_img_path = PLATES_DIR / f'plate_{ts}.png'
             cv2.imwrite(str(plate_img_path), plate_crop)
 
             frame_img_path = ''
             if SAVE_FULL_FRAME:
-                frame_path = FRAMES_DIR / f'frame_{ts}.jpg'
+                frame_path = FRAMES_DIR / f'frame_{ts}.png'
                 cv2.imwrite(str(frame_path), annotated)
                 frame_img_path = str(frame_path)
 
-            gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-            ocr_results = reader.readtext(gray)
-            raw_text = max(ocr_results, key=lambda x: x[2])[1] if ocr_results else ''
-            plate_text = _sanitize_plate_text(raw_text)
+            plate_text = _read_plate_text_with_char_model(char_model, plate_crop)
 
             x1, y1, x2, y2, conf = plate_bbox
             _append_csv_row(
