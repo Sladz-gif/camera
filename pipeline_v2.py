@@ -34,15 +34,15 @@ def process_video(video_in, video_out):
         if not ret: break
         results = model.track(frame, persist=True, conf=0.4, verbose=False)[0]
         if results.boxes.id is not None:
-            for box, obj_id, cls in zip(results.boxes.xyxy.cpu().numpy(), 
-                                        results.boxes.id.cpu().numpy(), 
+            for box, obj_id, cls in zip(results.boxes.xyxy.cpu().numpy(),
+                                        results.boxes.id.cpu().numpy(),
                                         results.boxes.cls.cpu().numpy()):
                 if int(cls) == 21:
                     enhanced = get_enhanced_zoom(frame, box)
                     if enhanced is not None:
                         ocr_res = model(enhanced, conf=0.5, verbose=False)[0]
                         chars = [c for c in ocr_res.boxes.data.cpu().numpy() if int(c[5]) not in [21, 33]]
-                        chars.sort(key=lambda x: x[0]) 
+                        chars.sort(key=lambda x: x[0])
                         plate_text = "".join([char_map.get(int(c[5]), '') for c in chars])
                         x1, y1, x2, y2 = map(int, box)
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
